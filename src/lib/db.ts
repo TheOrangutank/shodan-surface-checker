@@ -1,5 +1,5 @@
 import "server-only";
-import { createClient } from "@supabase/supabase-js";
+import { Pool, type QueryResultRow } from "pg";
 
 export class DatabaseConfigError extends Error {
   constructor(message: string) {
@@ -8,28 +8,67 @@ export class DatabaseConfigError extends Error {
   }
 }
 
-const PLACEHOLDER_SUPABASE_URL = "https://your-project.supabase.co";
-const PLACEHOLDER_SERVICE_ROLE_KEY = "your_service_role_key_here";
+const PLACEHOLDER_DATABASE_URL =
+  "postgresql://asc_user:replace_with_db_password@127.0.0.1:5432/attack_surface_checker";
 
-export function getDb() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const globalForPg = globalThis as typeof globalThis & {
+  __attackSurfaceCheckerPool?: Pool;
+};
 
-  if (
-    !supabaseUrl ||
-    !serviceRoleKey ||
-    supabaseUrl === PLACEHOLDER_SUPABASE_URL ||
-    serviceRoleKey === PLACEHOLDER_SERVICE_ROLE_KEY
-  ) {
+function getDatabaseUrl() {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+
+  if (!databaseUrl || databaseUrl === PLACEHOLDER_DATABASE_URL) {
     throw new DatabaseConfigError(
-      "Supabase is not configured. Copy .env.example to .env.local and set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+      "PostgreSQL is not configured. Copy .env.example to .env.local and set DATABASE_URL.",
     );
   }
 
-  return createClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
+  try {
+    const parsed = new URL(databaseUrl);
+    if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+      throw new Error("invalid protocol");
+    }
+    if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname)) {
+      throw new DatabaseConfigError(
+        "DATABASE_URL must point to local PostgreSQL (127.0.0.1, localhost, or ::1).",
+      );
+    }
+  } catch (err) {
+    if (err instanceof DatabaseConfigError) {
+      throw err;
+    }
+    throw new DatabaseConfigError(
+      "DATABASE_URL must be a valid PostgreSQL connection string.",
+    );
+  }
+
+  return databaseUrl;
+}
+
+function getPool() {
+  if (!globalForPg.__attackSurfaceCheckerPool) {
+    globalForPg.__attackSurfaceCheckerPool = new Pool({
+      connectionString: getDatabaseUrl(),
+      max: 5,
+    });
+  }
+
+  return globalForPg.__attackSurfaceCheckerPool;
+}
+
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  values: unknown[] = [],
+) {
+  const result = await getPool().query<T>(text, values);
+  return result.rows;
+}
+
+export async function queryOne<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  values: unknown[] = [],
+) {
+  const rows = await query<T>(text, values);
+  return rows[0] ?? null;
 }

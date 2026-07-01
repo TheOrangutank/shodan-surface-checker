@@ -89,7 +89,7 @@ function handleAssetRouteError(err: unknown) {
   }
 
   if (err instanceof DatabaseConfigError) {
-    return jsonError("The server is missing its Supabase database configuration.", 500);
+    return jsonError("The server is missing its PostgreSQL database configuration.", 500);
   }
 
   return unexpectedErrorResponse(err);

@@ -3,10 +3,11 @@ import type {
   AssetPatchPayload,
   AssetPayload,
   AssetSummary,
+  AssetSnapshot,
   AssetType,
   MonitoredAsset,
 } from "@/types/assets";
-import { getDb } from "@/lib/db";
+import { query, queryOne } from "@/lib/db";
 import { getPublicShodanErrorMessage } from "@/lib/api-errors";
 import { ShodanError, shodanGetDomain, shodanGetHost, summarizePorts } from "@/lib/shodan";
 
@@ -38,80 +39,88 @@ export function sanitizeAssetLabel(value: unknown) {
 }
 
 export async function listAssets() {
-  const { data, error } = await getDb()
-    .from("monitored_assets")
-    .select("*")
-    .order("created_at", { ascending: false });
-
-  if (error) {
+  try {
+    const rows = await query<MonitoredAssetRow>(
+      "select * from monitored_assets order by created_at desc",
+    );
+    return rows.map(toMonitoredAsset);
+  } catch {
     throw new AssetServiceError("Unable to load monitored assets.");
   }
-
-  return data;
 }
 
 export async function createAsset(payload: AssetPayload) {
-  const { data, error } = await getDb()
-    .from("monitored_assets")
-    .insert({
-      type: payload.type,
-      value: payload.value,
-      label: sanitizeAssetLabel(payload.label),
-      last_queried_at: null,
-      last_result: null,
-      last_summary: null,
-      last_error: null,
-    })
-    .select("*")
-    .single();
+  try {
+    const row = await queryOne<MonitoredAssetRow>(
+      `
+        insert into monitored_assets (
+          type, value, label, last_queried_at, last_result, last_summary, last_error
+        )
+        values ($1, $2, $3, null, null, null, null)
+        returning *
+      `,
+      [payload.type, payload.value, sanitizeAssetLabel(payload.label)],
+    );
 
-  if (error) {
-    throw mapDbError(error.message);
+    if (!row) {
+      throw new Error("insert returned no rows");
+    }
+
+    return toMonitoredAsset(row);
+  } catch (err) {
+    throw mapDbError(err);
   }
-
-  return data;
 }
 
 export async function updateAsset(id: string, payload: AssetPatchPayload) {
   const current = await getAsset(id);
   const nextType = payload.type ?? current.type;
   const nextValue = payload.value ?? current.value;
+  const nextLabel = "label" in payload ? sanitizeAssetLabel(payload.label) : current.label;
   const targetChanged = nextType !== current.type || nextValue !== current.value;
 
-  const update: Partial<MonitoredAsset> = {
-    type: nextType,
-    value: nextValue,
-  };
+  try {
+    const row = await queryOne<MonitoredAssetRow>(
+      `
+        update monitored_assets
+        set
+          type = $2,
+          value = $3,
+          label = $4,
+          last_queried_at = $5,
+          last_result = $6::jsonb,
+          last_summary = $7::jsonb,
+          last_error = $8
+        where id = $1
+        returning *
+      `,
+      [
+        id,
+        nextType,
+        nextValue,
+        nextLabel,
+        targetChanged ? null : current.last_queried_at,
+        targetChanged ? null : toJsonParam(current.last_result),
+        targetChanged ? null : toJsonParam(current.last_summary),
+        targetChanged ? null : current.last_error,
+      ],
+    );
 
-  if ("label" in payload) {
-    update.label = sanitizeAssetLabel(payload.label);
+    if (!row) {
+      throw new AssetServiceError("Monitored asset was not found.", 404);
+    }
+
+    return toMonitoredAsset(row);
+  } catch (err) {
+    if (err instanceof AssetServiceError) throw err;
+    throw mapDbError(err);
   }
-
-  if (targetChanged) {
-    update.last_queried_at = null;
-    update.last_result = null;
-    update.last_summary = null;
-    update.last_error = null;
-  }
-
-  const { data, error } = await getDb()
-    .from("monitored_assets")
-    .update(update)
-    .eq("id", id)
-    .select("*")
-    .single();
-
-  if (error) {
-    throw mapDbError(error.message);
-  }
-
-  return data;
 }
 
 export async function deleteAsset(id: string) {
-  const { error } = await getDb().from("monitored_assets").delete().eq("id", id);
-
-  if (error) {
+  try {
+    await query("delete from monitored_assets where id = $1", [id]);
+  } catch {
     throw new AssetServiceError("Unable to remove monitored asset.");
   }
 }
@@ -175,38 +184,91 @@ export async function refreshAsset(id: string) {
 }
 
 async function getAsset(id: string) {
-  const { data, error } = await getDb()
-    .from("monitored_assets")
-    .select("*")
-    .eq("id", id)
-    .single();
+  const row = await queryOne<MonitoredAssetRow>(
+    "select * from monitored_assets where id = $1",
+    [id],
+  );
 
-  if (error || !data) {
+  if (!row) {
     throw new AssetServiceError("Monitored asset was not found.", 404);
   }
 
-  return data;
+  return toMonitoredAsset(row);
 }
 
 async function updateRefreshState(id: string, update: Partial<MonitoredAsset>) {
-  const { data, error } = await getDb()
-    .from("monitored_assets")
-    .update(update)
-    .eq("id", id)
-    .select("*")
-    .single();
+  const current = await getAsset(id);
 
-  if (error) {
+  try {
+    const row = await queryOne<MonitoredAssetRow>(
+      `
+        update monitored_assets
+        set
+          last_queried_at = $2,
+          last_result = $3::jsonb,
+          last_summary = $4::jsonb,
+          last_error = $5
+        where id = $1
+        returning *
+      `,
+      [
+        id,
+        "last_queried_at" in update ? update.last_queried_at : current.last_queried_at,
+        "last_result" in update ? toJsonParam(update.last_result) : toJsonParam(current.last_result),
+        "last_summary" in update
+          ? toJsonParam(update.last_summary)
+          : toJsonParam(current.last_summary),
+        "last_error" in update ? update.last_error : current.last_error,
+      ],
+    );
+
+    if (!row) {
+      throw new Error("update returned no rows");
+    }
+
+    return toMonitoredAsset(row);
+  } catch {
     throw new AssetServiceError("Unable to update monitored asset.");
   }
-
-  return data;
 }
 
-function mapDbError(message: string) {
-  if (message.includes("duplicate key")) {
+interface MonitoredAssetRow extends Omit<MonitoredAsset, "last_queried_at" | "created_at" | "updated_at"> {
+  last_queried_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+function toMonitoredAsset(row: MonitoredAssetRow): MonitoredAsset {
+  return {
+    ...row,
+    last_queried_at: toIsoString(row.last_queried_at),
+    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+    updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
+  };
+}
+
+function toIsoString(value: Date | string | null) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function toJsonParam(value: AssetSnapshot | AssetSummary | null | undefined) {
+  return value === null || typeof value === "undefined" ? null : JSON.stringify(value);
+}
+
+function mapDbError(err: unknown) {
+  if (isPostgresError(err, "23505")) {
     return new AssetServiceError("That target is already being monitored.", 409);
   }
 
   return new AssetServiceError("Unable to save monitored asset.");
+}
+
+function isPostgresError(err: unknown, code: string) {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: string }).code === code
+  );
 }

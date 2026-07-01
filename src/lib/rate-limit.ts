@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { getDb } from "@/lib/db";
+import { queryOne } from "@/lib/db";
 
 interface RateLimitOptions {
   limit: number;
@@ -57,19 +57,18 @@ export async function checkSharedRateLimit(
   limit: number,
   windowSeconds: number,
 ): Promise<RateLimitResult> {
-  const { data, error } = await getDb().rpc("check_rate_limit", {
-    bucket_key: key,
-    max_count: limit,
-    window_seconds: windowSeconds,
-  });
+  const row = await queryOne<{ allowed: boolean; retry_after: number }>(
+    "select allowed, retry_after from check_rate_limit($1, $2, $3)",
+    [key, limit, windowSeconds],
+  ).catch(() => null);
 
-  if (error || !data?.[0]) {
+  if (!row) {
     return { allowed: false, retryAfterSeconds: 60 };
   }
 
   return {
-    allowed: Boolean(data[0].allowed),
-    retryAfterSeconds: Number(data[0].retry_after ?? 0),
+    allowed: Boolean(row.allowed),
+    retryAfterSeconds: Number(row.retry_after ?? 0),
   };
 }
 

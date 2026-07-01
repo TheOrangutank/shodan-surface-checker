@@ -2,7 +2,7 @@ import "server-only";
 import { createHash, createHmac, randomBytes } from "crypto";
 import type { NextRequest, NextResponse } from "next/server";
 import type { AuthenticatorTransportFuture, WebAuthnCredential } from "@simplewebauthn/server";
-import { getDb } from "@/lib/db";
+import { query, queryOne } from "@/lib/db";
 
 export const SESSION_COOKIE = "asc_session";
 export const CSRF_COOKIE = "asc_csrf";
@@ -122,88 +122,91 @@ export function requireSetupToken(request: NextRequest) {
 }
 
 export async function passkeyRegistrationAllowed() {
-  const { count, error } = await getDb()
-    .from("passkey_credentials")
-    .select("id", { count: "exact", head: true });
-
-  if (error) {
+  try {
+    const row = await queryOne<{ count: string }>("select count(*)::text as count from passkey_credentials");
+    return Number(row?.count ?? 0) === 0 || process.env.ALLOW_PASSKEY_REENROLL === "true";
+  } catch {
     throw new AuthError("Unable to check passkey registration state.", 500);
   }
-
-  return (count ?? 0) === 0 || process.env.ALLOW_PASSKEY_REENROLL === "true";
 }
 
 export async function saveChallenge(type: "registration" | "authentication", challenge: string) {
   const expiresAt = new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString();
-  const { error } = await getDb()
-    .from("auth_challenges")
-    .insert({ type, challenge, expires_at: expiresAt });
 
-  if (error) {
+  try {
+    await query(
+      "insert into auth_challenges (type, challenge, expires_at) values ($1, $2, $3)",
+      [type, challenge, expiresAt],
+    );
+  } catch {
     throw new AuthError("Unable to save authentication challenge.", 500);
   }
 }
 
 export async function consumeChallenge(type: "registration" | "authentication", challenge: string) {
-  const { data, error } = await getDb()
-    .from("auth_challenges")
-    .delete()
-    .eq("type", type)
-    .eq("challenge", challenge)
-    .gt("expires_at", new Date().toISOString())
-    .select("challenge")
-    .single();
+  const row = await queryOne<{ challenge: string }>(
+    `
+      delete from auth_challenges
+      where type = $1
+        and challenge = $2
+        and expires_at > now()
+      returning challenge
+    `,
+    [type, challenge],
+  );
 
-  if (error || !data) {
+  if (!row) {
     throw new AuthError("Authentication challenge expired or was not found.", 400);
   }
 }
 
 export async function listCredentials() {
-  const { data, error } = await getDb()
-    .from("passkey_credentials")
-    .select("*")
-    .order("created_at", { ascending: true });
-
-  if (error) {
+  try {
+    return await query<StoredCredential>(
+      "select id, credential_id, public_key, counter, transports from passkey_credentials order by created_at asc",
+    );
+  } catch {
     throw new AuthError("Unable to load passkey credentials.", 500);
   }
-
-  return data as StoredCredential[];
 }
 
 export async function saveCredential(credential: WebAuthnCredential) {
-  const { error } = await getDb().from("passkey_credentials").insert({
-    credential_id: credential.id,
-    public_key: bytesToBase64Url(credential.publicKey),
-    counter: credential.counter,
-    transports: credential.transports ?? null,
-  });
-
-  if (error) {
+  try {
+    await query(
+      `
+        insert into passkey_credentials (credential_id, public_key, counter, transports)
+        values ($1, $2, $3, $4)
+      `,
+      [
+        credential.id,
+        bytesToBase64Url(credential.publicKey),
+        credential.counter,
+        credential.transports ?? null,
+      ],
+    );
+  } catch {
     throw new AuthError("Unable to save passkey credential.", 500);
   }
 }
 
 export async function getCredential(credentialId: string) {
-  const { data, error } = await getDb()
-    .from("passkey_credentials")
-    .select("*")
-    .eq("credential_id", credentialId)
-    .single();
+  const row = await queryOne<StoredCredential>(
+    "select id, credential_id, public_key, counter, transports from passkey_credentials where credential_id = $1",
+    [credentialId],
+  );
 
-  if (error || !data) {
+  if (!row) {
     throw new AuthError("Passkey credential was not found.", 401);
   }
 
-  return data as StoredCredential;
+  return row;
 }
 
 export async function updateCredentialCounter(credentialId: string, counter: number) {
-  await getDb()
-    .from("passkey_credentials")
-    .update({ counter, last_used_at: new Date().toISOString() })
-    .eq("credential_id", credentialId);
+  await query(
+    "update passkey_credentials set counter = $2, last_used_at = now() where credential_id = $1",
+    [credentialId, counter],
+  );
 }
 
 export function toWebAuthnCredential(credential: StoredCredential): WebAuthnCredential {
@@ -221,24 +224,27 @@ export async function createSession(request: NextRequest) {
   const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000);
   const { sessionSecret } = getAuthConfig();
 
-  const { data, error } = await getDb()
-    .from("app_sessions")
-    .insert({
-      token_hash: hashSecret(sessionToken, sessionSecret),
-      csrf_hash: hashSecret(csrfToken, sessionSecret),
-      user_agent: request.headers.get("user-agent"),
-      ip: getClientIp(request),
-      expires_at: expiresAt.toISOString(),
-    })
-    .select("id, token_hash, csrf_hash, expires_at")
-    .single();
+  const row = await queryOne<AppSessionRow>(
+    `
+      insert into app_sessions (token_hash, csrf_hash, user_agent, ip, expires_at)
+      values ($1, $2, $3, $4, $5)
+      returning id, token_hash, csrf_hash, expires_at
+    `,
+    [
+      hashSecret(sessionToken, sessionSecret),
+      hashSecret(csrfToken, sessionSecret),
+      request.headers.get("user-agent"),
+      getClientIp(request),
+      expiresAt.toISOString(),
+    ],
+  );
 
-  if (error || !data) {
+  if (!row) {
     throw new AuthError("Unable to create session.", 500);
   }
 
   return {
-    session: data as AppSession,
+    session: toAppSession(row),
     sessionToken,
     csrfToken,
     expiresAt,
@@ -251,21 +257,21 @@ export async function getSession(request: NextRequest) {
 
   const { sessionSecret } = getAuthConfig();
   const tokenHash = hashSecret(token, sessionSecret);
-  const { data, error } = await getDb()
-    .from("app_sessions")
-    .select("id, token_hash, csrf_hash, expires_at")
-    .eq("token_hash", tokenHash)
-    .gt("expires_at", new Date().toISOString())
-    .single();
+  const row = await queryOne<AppSessionRow>(
+    `
+      select id, token_hash, csrf_hash, expires_at
+      from app_sessions
+      where token_hash = $1
+        and expires_at > now()
+    `,
+    [tokenHash],
+  );
 
-  if (error || !data) return null;
+  if (!row) return null;
 
-  await getDb()
-    .from("app_sessions")
-    .update({ last_used_at: new Date().toISOString() })
-    .eq("id", data.id);
+  await query("update app_sessions set last_used_at = now() where id = $1", [row.id]);
 
-  return data as AppSession;
+  return toAppSession(row);
 }
 
 export async function requireSession(request: NextRequest) {
@@ -281,10 +287,9 @@ export async function destroySession(request: NextRequest) {
   if (!token) return;
 
   const { sessionSecret } = getAuthConfig();
-  await getDb()
-    .from("app_sessions")
-    .delete()
-    .eq("token_hash", hashSecret(token, sessionSecret));
+  await query("delete from app_sessions where token_hash = $1", [
+    hashSecret(token, sessionSecret),
+  ]);
 }
 
 export function setSessionCookies(
@@ -313,6 +318,17 @@ export function setSessionCookies(
 export function clearSessionCookies(response: NextResponse) {
   response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
   response.cookies.set(CSRF_COOKIE, "", { path: "/", maxAge: 0 });
+}
+
+interface AppSessionRow extends Omit<AppSession, "expires_at"> {
+  expires_at: Date | string;
+}
+
+function toAppSession(row: AppSessionRow): AppSession {
+  return {
+    ...row,
+    expires_at: row.expires_at instanceof Date ? row.expires_at.toISOString() : row.expires_at,
+  };
 }
 
 export async function verifyCsrf(request: NextRequest, session: AppSession) {

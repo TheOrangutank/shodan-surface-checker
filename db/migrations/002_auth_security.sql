@@ -1,6 +1,4 @@
-alter table monitored_assets
-  add constraint monitored_assets_value_length check (char_length(value) <= 253),
-  add constraint monitored_assets_label_length check (label is null or char_length(label) <= 80);
+create extension if not exists pgcrypto;
 
 create table if not exists passkey_credentials (
   id uuid primary key default gen_random_uuid(),

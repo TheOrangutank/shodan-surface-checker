@@ -1,3 +1,5 @@
+create extension if not exists pgcrypto;
+
 create table if not exists monitored_assets (
   id uuid primary key default gen_random_uuid(),
   type text not null check (type in ('domain', 'ip')),
@@ -9,7 +11,9 @@ create table if not exists monitored_assets (
   last_error text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (type, value)
+  unique (type, value),
+  constraint monitored_assets_value_length check (char_length(value) <= 253),
+  constraint monitored_assets_label_length check (label is null or char_length(label) <= 80)
 );
 
 create or replace function set_monitored_assets_updated_at()
