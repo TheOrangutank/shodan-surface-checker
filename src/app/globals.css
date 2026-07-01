@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0805;
+  --panel: #120d08;
+  --border: #3a2a10;
+  --amber: #ffb000;
+  --amber-dim: #b37b00;
+  --amber-muted: #7a5a20;
+  --risk-high: #ff3b30;
+  --risk-medium: #ffb000;
+  --risk-low: #6b8f00;
+  --risk-info: #b37b00;
+}
+
+body {
+  background: var(--background);
+  color: var(--amber);
+  font-family:
+    ui-monospace,
+    "JetBrains Mono",
+    "Fira Code",
+    "SFMono-Regular",
+    Menlo,
+    Consolas,
+    monospace;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+.terminal-glow {
+  text-shadow: 0 0 6px rgba(255, 176, 0, 0.55);
+}
+
+.terminal-panel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 0;
+}
+
+.terminal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.terminal-table th {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--amber-dim);
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-table tr:last-child td {
+  border-bottom: none;
+}
+
+.scanline-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 176, 0, 0.04) 0px,
+    rgba(255, 176, 0, 0.04) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
